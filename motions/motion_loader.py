@@ -14,7 +14,14 @@ class MotionLoader:
     Helper class to load and sample motion data from NumPy-file format.
     """
 
-    def __init__(self, motion_file: str, device: torch.device) -> None:
+    def __init__(
+        self,
+        motion_file: str,
+        device: torch.device,
+        *,
+        dof_names: Optional[list[str]] = None,
+        body_names: Optional[list[str]] = None,
+    ) -> None:
         """Load a motion file and initialize the internal variables.
 
         Args:
@@ -27,22 +34,109 @@ class MotionLoader:
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
         data = np.load(motion_file)
 
+        def _get_first_available(keys: list[str], *, logical_name: str):
+            for key in keys:
+                if key in data:
+                    return data[key]
+            raise KeyError(
+                f"'{logical_name}' is not a file in the archive (expected one of {keys}). "
+                f"Available keys: {list(data.files)}"
+            )
+
         self.device = device
-        self._dof_names = data["dof_names"].tolist()
-        self._body_names = data["body_names"].tolist()
 
-        self.dof_positions = torch.tensor(data["dof_positions"], dtype=torch.float32, device=self.device)
-        self.dof_velocities = torch.tensor(data["dof_velocities"], dtype=torch.float32, device=self.device)
-        self.body_positions = torch.tensor(data["body_positions"], dtype=torch.float32, device=self.device)
-        self.body_rotations = torch.tensor(data["body_rotations"], dtype=torch.float32, device=self.device)
-        self.body_linear_velocities = torch.tensor(
-            data["body_linear_velocities"], dtype=torch.float32, device=self.device
+        # Support multiple motion file schemas.
+        # Canonical schema:
+        #   dof_names, body_names, dof_positions, dof_velocities, body_positions, body_rotations,
+        #   body_linear_velocities, body_angular_velocities, fps
+        # Alternate schema observed in some exports:
+        #   joint_pos, joint_vel, body_pos_w, body_quat_w, body_lin_vel_w, body_ang_vel_w, fps
+        dof_positions_np = _get_first_available(["dof_positions", "joint_pos"], logical_name="dof_positions")
+        dof_velocities_np = _get_first_available(["dof_velocities", "joint_vel"], logical_name="dof_velocities")
+        body_positions_np = _get_first_available(["body_positions", "body_pos_w"], logical_name="body_positions")
+        body_rotations_np = _get_first_available(["body_rotations", "body_quat_w"], logical_name="body_rotations")
+        body_lin_vel_np = _get_first_available(
+            ["body_linear_velocities", "body_lin_vel_w"], logical_name="body_linear_velocities"
         )
-        self.body_angular_velocities = torch.tensor(
-            data["body_angular_velocities"], dtype=torch.float32, device=self.device
+        body_ang_vel_np = _get_first_available(
+            ["body_angular_velocities", "body_ang_vel_w"], logical_name="body_angular_velocities"
         )
 
-        self.dt = 1.0 / data["fps"]
+        self.dof_positions = torch.tensor(dof_positions_np, dtype=torch.float32, device=self.device)
+        self.dof_velocities = torch.tensor(dof_velocities_np, dtype=torch.float32, device=self.device)
+        self.body_positions = torch.tensor(body_positions_np, dtype=torch.float32, device=self.device)
+        self.body_rotations = torch.tensor(body_rotations_np, dtype=torch.float32, device=self.device)
+        self.body_linear_velocities = torch.tensor(body_lin_vel_np, dtype=torch.float32, device=self.device)
+        self.body_angular_velocities = torch.tensor(body_ang_vel_np, dtype=torch.float32, device=self.device)
+
+        # Names are required for mapping (e.g., get_dof_index / get_body_index).
+        if "dof_names" in data:
+            self._dof_names = data["dof_names"].tolist()
+        elif dof_names is not None:
+            self._dof_names = list(dof_names)
+        else:
+            raise KeyError(
+                "'dof_names' is not a file in the archive. "
+                "Provide dof_names=... to MotionLoader or regenerate the npz with dof_names included. "
+                f"Available keys: {list(data.files)}"
+            )
+
+        if "body_names" in data:
+            self._body_names = data["body_names"].tolist()
+        elif body_names is not None:
+            # Some motion exports omit names but still follow a mostly-URDF ordering while dropping a few
+            # auxiliary/sensor links. Try to reconcile lengths if possible.
+            provided_body_names = list(body_names)
+            expected_num_bodies = int(self.body_positions.shape[1])
+            if len(provided_body_names) != expected_num_bodies:
+                drop_candidates = [
+                    # common sensor/aux links in some robots
+                    "d435_link",
+                    "mid360_link",
+                    "imu_in_torso",
+                    "imu_in_pelvis",
+                    # occasional visual-only links
+                    "logo_link",
+                    "pelvis_contour_link",
+                ]
+                # Drop as few as needed (in priority order) to match expected body count.
+                reconciled = list(provided_body_names)
+                for name in drop_candidates:
+                    if len(reconciled) <= expected_num_bodies:
+                        break
+                    if name in reconciled:
+                        reconciled.remove(name)
+                if len(reconciled) == expected_num_bodies:
+                    provided_body_names = reconciled
+            self._body_names = provided_body_names
+        else:
+            raise KeyError(
+                "'body_names' is not a file in the archive. "
+                "Provide body_names=... to MotionLoader or regenerate the npz with body_names included. "
+                f"Available keys: {list(data.files)}"
+            )
+
+        # Validate shapes against provided names.
+        if self.dof_positions.ndim != 2:
+            raise ValueError(f"Expected dof_positions to have shape (T, num_dofs), got {tuple(self.dof_positions.shape)}")
+        if self.body_positions.ndim != 3 or self.body_positions.shape[-1] != 3:
+            raise ValueError(
+                f"Expected body_positions to have shape (T, num_bodies, 3), got {tuple(self.body_positions.shape)}"
+            )
+        if len(self._dof_names) != self.dof_positions.shape[1]:
+            raise ValueError(
+                f"dof_names length ({len(self._dof_names)}) does not match dof_positions second dimension "
+                f"({self.dof_positions.shape[1]})."
+            )
+        if len(self._body_names) != self.body_positions.shape[1]:
+            raise ValueError(
+                f"body_names length ({len(self._body_names)}) does not match body_positions second dimension "
+                f"({self.body_positions.shape[1]}). "
+                "This usually means the motion file was exported for a different link set/order. "
+                "Regenerate the motion npz with body_names included, or provide matching body_names."
+            )
+
+        self.dt = 1.0 / float(_get_first_available(["fps"], logical_name="fps"))
         self.num_frames = self.dof_positions.shape[0]
         self.duration = self.dt * (self.num_frames - 1)
         print(f"Motion loaded ({motion_file}): duration: {self.duration} sec, frames: {self.num_frames}")
