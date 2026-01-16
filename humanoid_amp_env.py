@@ -32,7 +32,12 @@ class HumanoidAmpEnv(DirectRLEnv):
         self.action_scale = dof_upper_limits - dof_lower_limits
 
         # load motion
-        self._motion_loader = MotionLoader(motion_file=self.cfg.motion_file, device=self.device)
+        self._motion_loader = MotionLoader(
+            motion_file=self.cfg.motion_file,
+            device=self.device,
+            dof_names=self.robot.data.joint_names,
+            body_names=self.robot.data.body_names,
+        )
 
         # DOF and key body indexes
         key_body_names = ["right_hand", "left_hand", "right_foot", "left_foot"]
