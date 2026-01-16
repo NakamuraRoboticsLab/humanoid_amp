@@ -30,6 +30,12 @@ We copy the train and play script from isaaclab, note you do not need to do it y
 bash ./sync_skrl_scripts.sh
 ```
 
+##  Motion View
+```bash
+/home/zewenhe/src/humanoid_amp/.conda/bin/python motions/motion_viewer.py --file motions/G1_run.npz --matplotlib-backend TkAgg
+```
+
+
 ## Train
 
 ```bash

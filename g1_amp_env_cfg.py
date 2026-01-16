@@ -24,11 +24,13 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     """Humanoid AMP environment config (base class)."""
     
     # reward
-    rew_termination = -0
-    rew_action_l2 = -0.00
-    rew_joint_pos_limits = -0
-    rew_joint_acc_l2 =-0.00
-    rew_joint_vel_l2= -0.00
+    # Note: these are *task* rewards (environment rewards). In AMP training they are
+    # mixed with the style/discriminator reward using `task_reward_weight`.
+    rew_termination = -2.0
+    rew_action_l2 = -0.001
+    rew_joint_pos_limits = -2.0
+    rew_joint_acc_l2 = -1.0e-5
+    rew_joint_vel_l2 = -1.0e-4
 
     # env
     episode_length_s = 10.0
@@ -45,6 +47,10 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     termination_height = 0.5
 
     motion_file: str = MISSING
+    # Optional frame range to use from the motion file.
+    # Format: (start, end) with Python slicing semantics [start, end).
+    # Example: (600, 701) uses frames 600..700 inclusive.
+    motion_frame_range: tuple[int, int] | None = None
     reference_body = "pelvis"
     reset_strategy = "random"  # default, random, random-start
     """Strategy to be followed when resetting each environment (humanoid's pose and joint states).

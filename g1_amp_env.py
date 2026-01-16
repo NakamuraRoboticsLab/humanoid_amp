@@ -33,11 +33,17 @@ class G1AmpEnv(DirectRLEnv):
 
 
         # load motion
+        frame_start = None
+        frame_end = None
+        if getattr(self.cfg, "motion_frame_range", None) is not None:
+            frame_start, frame_end = self.cfg.motion_frame_range
         self._motion_loader = MotionLoader(
             motion_file=self.cfg.motion_file,
             device=self.device,
             dof_names=self.robot.data.joint_names,
             body_names=self.robot.data.body_names,
+            frame_start=frame_start,
+            frame_end=frame_end,
         )
 
         # DOF and key body indexes  
@@ -211,9 +217,12 @@ class G1AmpEnv(DirectRLEnv):
         # sample random motion times (or use the one specified)
         if current_times is None:
             current_times = self._motion_loader.sample_times(num_samples)
+        # The AMP observation history is collected once per environment step (i.e. control step),
+        # which runs at dt = sim.dt * decimation. Use the same spacing for reference frames.
+        ref_dt = float(self.cfg.sim.dt) * int(self.cfg.decimation)
         times = (
             np.expand_dims(current_times, axis=-1)
-            - self._motion_loader.dt * np.arange(0, self.cfg.num_amp_observations)
+            - ref_dt * np.arange(0, self.cfg.num_amp_observations)
         ).flatten()
         # get motions
         (

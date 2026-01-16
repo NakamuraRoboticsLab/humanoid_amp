@@ -21,6 +21,8 @@ class MotionLoader:
         *,
         dof_names: Optional[list[str]] = None,
         body_names: Optional[list[str]] = None,
+        frame_start: int | None = None,
+        frame_end: int | None = None,
     ) -> None:
         """Load a motion file and initialize the internal variables.
 
@@ -33,6 +35,49 @@ class MotionLoader:
         """
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
         data = np.load(motion_file)
+
+        def _infer_names_from_neighbor_npz(
+            *,
+            expected_num_dofs: int,
+            expected_num_bodies: int,
+        ) -> tuple[Optional[list[str]], Optional[list[str]]]:
+            """Try to infer dof/body names from a sibling .npz file.
+
+            Some exports omit `dof_names` and `body_names` but keep the same ordering as
+            other motion files for the same robot in the same folder.
+            """
+            motion_dir = os.path.dirname(os.path.abspath(motion_file))
+            try:
+                candidates = [
+                    os.path.join(motion_dir, name)
+                    for name in os.listdir(motion_dir)
+                    if name.endswith(".npz") and os.path.join(motion_dir, name) != os.path.abspath(motion_file)
+                ]
+            except OSError:
+                return None, None
+
+            for candidate in sorted(candidates):
+                try:
+                    ref = np.load(candidate)
+                except Exception:
+                    continue
+                if "dof_names" not in ref or "body_names" not in ref:
+                    continue
+
+                # Prefer a reference with matching DOF/body dimensions.
+                ref_dof_names = ref["dof_names"].tolist()
+                ref_body_names = ref["body_names"].tolist()
+                if len(ref_dof_names) != expected_num_dofs:
+                    continue
+
+                # Body count can differ across exports (sensor/aux links removed), so only
+                # require reference to have at least as many names; we will reconcile later.
+                if len(ref_body_names) < expected_num_bodies:
+                    continue
+
+                return ref_dof_names, ref_body_names
+
+            return None, None
 
         def _get_first_available(keys: list[str], *, logical_name: str):
             for key in keys:
@@ -62,6 +107,27 @@ class MotionLoader:
             ["body_angular_velocities", "body_ang_vel_w"], logical_name="body_angular_velocities"
         )
 
+        # Optionally clip to a frame range [frame_start, frame_end) before converting to tensors.
+        # This is useful to train on a short segment of a long motion without regenerating the npz.
+        total_frames = int(dof_positions_np.shape[0])
+        if frame_start is None:
+            frame_start = 0
+        if frame_end is None:
+            frame_end = total_frames
+        if not (0 <= int(frame_start) < int(frame_end) <= total_frames):
+            raise ValueError(
+                f"Invalid frame range [{frame_start}, {frame_end}) for motion with {total_frames} frames. "
+                "Expected 0 <= frame_start < frame_end <= num_frames."
+            )
+        frame_slice = slice(int(frame_start), int(frame_end))
+
+        dof_positions_np = dof_positions_np[frame_slice]
+        dof_velocities_np = dof_velocities_np[frame_slice]
+        body_positions_np = body_positions_np[frame_slice]
+        body_rotations_np = body_rotations_np[frame_slice]
+        body_lin_vel_np = body_lin_vel_np[frame_slice]
+        body_ang_vel_np = body_ang_vel_np[frame_slice]
+
         self.dof_positions = torch.tensor(dof_positions_np, dtype=torch.float32, device=self.device)
         self.dof_velocities = torch.tensor(dof_velocities_np, dtype=torch.float32, device=self.device)
         self.body_positions = torch.tensor(body_positions_np, dtype=torch.float32, device=self.device)
@@ -69,52 +135,59 @@ class MotionLoader:
         self.body_linear_velocities = torch.tensor(body_lin_vel_np, dtype=torch.float32, device=self.device)
         self.body_angular_velocities = torch.tensor(body_ang_vel_np, dtype=torch.float32, device=self.device)
 
-        # Names are required for mapping (e.g., get_dof_index / get_body_index).
+        # Names are useful for mapping (e.g., get_dof_index / get_body_index) and nicer debug output.
+        # Some motion files omit them; for visualization-only use-cases we can infer or generate names.
+        expected_num_dofs = int(self.dof_positions.shape[1])
+        expected_num_bodies = int(self.body_positions.shape[1])
+        inferred_dof_names = None
+        inferred_body_names = None
+        if ("dof_names" not in data and dof_names is None) or ("body_names" not in data and body_names is None):
+            inferred_dof_names, inferred_body_names = _infer_names_from_neighbor_npz(
+                expected_num_dofs=expected_num_dofs,
+                expected_num_bodies=expected_num_bodies,
+            )
+
         if "dof_names" in data:
             self._dof_names = data["dof_names"].tolist()
         elif dof_names is not None:
             self._dof_names = list(dof_names)
+        elif inferred_dof_names is not None:
+            self._dof_names = inferred_dof_names
         else:
-            raise KeyError(
-                "'dof_names' is not a file in the archive. "
-                "Provide dof_names=... to MotionLoader or regenerate the npz with dof_names included. "
-                f"Available keys: {list(data.files)}"
-            )
+            # Fall back to stable placeholder names.
+            self._dof_names = [f"dof_{i}" for i in range(expected_num_dofs)]
 
         if "body_names" in data:
             self._body_names = data["body_names"].tolist()
         elif body_names is not None:
-            # Some motion exports omit names but still follow a mostly-URDF ordering while dropping a few
-            # auxiliary/sensor links. Try to reconcile lengths if possible.
             provided_body_names = list(body_names)
-            expected_num_bodies = int(self.body_positions.shape[1])
-            if len(provided_body_names) != expected_num_bodies:
-                drop_candidates = [
-                    # common sensor/aux links in some robots
-                    "d435_link",
-                    "mid360_link",
-                    "imu_in_torso",
-                    "imu_in_pelvis",
-                    # occasional visual-only links
-                    "logo_link",
-                    "pelvis_contour_link",
-                ]
-                # Drop as few as needed (in priority order) to match expected body count.
-                reconciled = list(provided_body_names)
-                for name in drop_candidates:
-                    if len(reconciled) <= expected_num_bodies:
-                        break
-                    if name in reconciled:
-                        reconciled.remove(name)
-                if len(reconciled) == expected_num_bodies:
-                    provided_body_names = reconciled
             self._body_names = provided_body_names
+        elif inferred_body_names is not None:
+            self._body_names = inferred_body_names
         else:
-            raise KeyError(
-                "'body_names' is not a file in the archive. "
-                "Provide body_names=... to MotionLoader or regenerate the npz with body_names included. "
-                f"Available keys: {list(data.files)}"
-            )
+            self._body_names = [f"body_{i}" for i in range(expected_num_bodies)]
+
+        # Some motion exports omit a few auxiliary/sensor links but keep the ordering.
+        # Try to reconcile lengths if the provided/inferred list doesn't match the data.
+        if len(self._body_names) != expected_num_bodies:
+            drop_candidates = [
+                # common sensor/aux links in some robots
+                "d435_link",
+                "mid360_link",
+                "imu_in_torso",
+                "imu_in_pelvis",
+                # occasional visual-only links
+                "logo_link",
+                "pelvis_contour_link",
+            ]
+            reconciled = list(self._body_names)
+            for name in drop_candidates:
+                if len(reconciled) <= expected_num_bodies:
+                    break
+                if name in reconciled:
+                    reconciled.remove(name)
+            if len(reconciled) == expected_num_bodies:
+                self._body_names = reconciled
 
         # Validate shapes against provided names.
         if self.dof_positions.ndim != 2:
@@ -129,6 +202,8 @@ class MotionLoader:
                 f"({self.dof_positions.shape[1]})."
             )
         if len(self._body_names) != self.body_positions.shape[1]:
+            # For visualization we can continue with placeholder names, but for mapping we need a match.
+            # Keep this as a hard error because downstream code (replayer) assumes correct mapping.
             raise ValueError(
                 f"body_names length ({len(self._body_names)}) does not match body_positions second dimension "
                 f"({self.body_positions.shape[1]}). "
@@ -136,8 +211,21 @@ class MotionLoader:
                 "Regenerate the motion npz with body_names included, or provide matching body_names."
             )
 
-        self.dt = 1.0 / float(_get_first_available(["fps"], logical_name="fps"))
+        fps_value = _get_first_available(["fps"], logical_name="fps")
+        if isinstance(fps_value, np.ndarray):
+            if fps_value.shape == ():
+                fps = float(fps_value)
+            else:
+                fps = float(fps_value.reshape(-1)[0])
+        else:
+            fps = float(fps_value)
+        self.dt = 1.0 / fps
         self.num_frames = self.dof_positions.shape[0]
+        if self.num_frames < 2:
+            raise ValueError(
+                f"Motion must contain at least 2 frames after clipping, got {self.num_frames}. "
+                "Adjust frame_start/frame_end."
+            )
         self.duration = self.dt * (self.num_frames - 1)
         print(f"Motion loaded ({motion_file}): duration: {self.duration} sec, frames: {self.num_frames}")
 
