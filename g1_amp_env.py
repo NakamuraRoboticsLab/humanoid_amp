@@ -33,7 +33,12 @@ class G1AmpEnv(DirectRLEnv):
 
 
         # load motion
-        self._motion_loader = MotionLoader(motion_file=self.cfg.motion_file, device=self.device)
+        self._motion_loader = MotionLoader(
+            motion_file=self.cfg.motion_file,
+            device=self.device,
+            dof_names=self.robot.data.joint_names,
+            body_names=self.robot.data.body_names,
+        )
 
         # DOF and key body indexes  
         key_body_names = [ "left_shoulder_pitch_link",
