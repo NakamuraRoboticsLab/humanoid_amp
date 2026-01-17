@@ -9,6 +9,43 @@ import torch
 from typing import Optional
 
 
+# Default DOF ordering for G1 motions exported by the provided Isaac Lab CSV->NPZ pipeline.
+# In that script, the 29 columns in `joint_pos` follow the exact `joint_names` list passed to
+# robot.find_joints(..., preserve_order=True), and the resulting `joint_pos` array is saved
+# without `dof_names`.
+DEFAULT_G1_CSV_DOF_NAMES: list[str] = [
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+]
+
+
 class MotionLoader:
     """
     Helper class to load and sample motion data from NumPy-file format.
@@ -141,7 +178,18 @@ class MotionLoader:
         expected_num_bodies = int(self.body_positions.shape[1])
         inferred_dof_names = None
         inferred_body_names = None
-        if ("dof_names" not in data and dof_names is None) or ("body_names" not in data and body_names is None):
+
+        # Heuristic: if a G1 motion export omitted dof_names, recover the correct DOF ordering.
+        # This is critical because callers may otherwise (incorrectly) assume the file columns
+        # are in the robot's joint_names order.
+        motion_basename = os.path.basename(motion_file).lower()
+        if "dof_names" not in data and dof_names is None:
+            if expected_num_dofs == len(DEFAULT_G1_CSV_DOF_NAMES) and (motion_basename.startswith("g1_") or "g1" in motion_basename):
+                inferred_dof_names = list(DEFAULT_G1_CSV_DOF_NAMES)
+        if (
+            ("dof_names" not in data and dof_names is None and inferred_dof_names is None)
+            or ("body_names" not in data and body_names is None)
+        ):
             inferred_dof_names, inferred_body_names = _infer_names_from_neighbor_npz(
                 expected_num_dofs=expected_num_dofs,
                 expected_num_bodies=expected_num_bodies,

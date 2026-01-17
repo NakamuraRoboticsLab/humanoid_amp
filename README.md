@@ -35,6 +35,10 @@ bash ./sync_skrl_scripts.sh
 /home/zewenhe/src/humanoid_amp/.conda/bin/python motions/motion_viewer.py --file motions/G1_run.npz --matplotlib-backend TkAgg
 ```
 
+in Isaac Lab:
+```bash
+python motions/validate_g1_mapping.py --motion motions/G1_run_usd_reexport.npz --device cuda:0 --stride 1 --realtime
+```
 
 ## Train
 

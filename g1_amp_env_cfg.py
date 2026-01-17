@@ -34,7 +34,9 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
 
     # env
     episode_length_s = 10.0
-    decimation = 2
+    # Control (policy) frequency = 1 / (sim.dt * decimation)
+    # With sim.dt=1/200 and decimation=4, control frequency is 50 Hz.
+    decimation = 4
 
     # spaces
     observation_space =  71 + 3 * 10 #TODO
@@ -62,7 +64,7 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 60,
+        dt=1 / 200,
         render_interval=decimation,
         physx=PhysxCfg(
             gpu_found_lost_pairs_capacity=2**23,
@@ -87,4 +89,6 @@ class G1AmpWalkEnvCfg(G1AmpEnvCfg):
 
 @configclass
 class G1AmpRunEnvCfg(G1AmpEnvCfg):
-    motion_file = os.path.join(MOTIONS_DIR, "G1_run.npz")
+    motion_file = os.path.join(MOTIONS_DIR, "G1_run_usd_reexport.npz")
+    # Use only a subset of the motion for training: frames 600..800 (inclusive)
+    motion_frame_range = (600, 801)

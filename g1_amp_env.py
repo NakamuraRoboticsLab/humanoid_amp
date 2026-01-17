@@ -40,7 +40,6 @@ class G1AmpEnv(DirectRLEnv):
         self._motion_loader = MotionLoader(
             motion_file=self.cfg.motion_file,
             device=self.device,
-            dof_names=self.robot.data.joint_names,
             body_names=self.robot.data.body_names,
             frame_start=frame_start,
             frame_end=frame_end,
